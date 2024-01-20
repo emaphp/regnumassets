@@ -1,0 +1,17 @@
+[package]
+name = "regnumassets"
+version = "0.1.0"
+edition = "2021"
+description = "A crate for parsing game asset files from MMORPG Champions of Regnum"
+license = "MIT"
+repository = "https://github.com/emaphp/regnumassets/"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1.0"
+encoding_rs = "0.8"
+
+[examples]
+list_sounds = { name = "list_sounds", path = "examples/list_sounds.rs" }
+save_sound = { name = "save_sounds", path = "examples/save_sounds.rs" }

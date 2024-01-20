@@ -1,0 +1,5 @@
+/target
+
+# Resource files
+*.idx
+*.sdb

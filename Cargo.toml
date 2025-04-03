@@ -1,6 +1,6 @@
 [package]
 name = "regnumassets"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "A crate for parsing game asset files from MMORPG Champions of Regnum"
 license = "MIT"
@@ -11,7 +11,17 @@ repository = "https://github.com/emaphp/regnumassets/"
 [dependencies]
 anyhow = "1.0"
 encoding_rs = "0.8"
+nom = "8.0.0"
+byteorder = "1.5.0"
+ddsfile = "0.5.2"
 
 [examples]
 list_sounds = { name = "list_sounds", path = "examples/list_sounds.rs" }
-save_sound = { name = "save_sounds", path = "examples/save_sounds.rs" }
+list_music = { name = "list_music", path = "examples/list_music.rs" }
+list_texts = { name = "list_texts", path = "examples/list_texts.rs" }
+list_textures = { name = "list_textures", path = "examples/list_textures.rs" }
+list_characters = { name = "list_characters", path = "examples/list_characters.rs" }
+export_sound = { name = "export_sound", path = "examples/export_sound.rs" }
+export_music = { name = "export_music", path = "examples/export_music.rs" }
+export_texture = { name = "export_texture", path = "examples/export_texture.rs" }
+show_text = { name = "show_text", path = "examples/show_text.rs" }

@@ -6,7 +6,7 @@ fn main() -> Result<()> {
     let f = File::open("examples/regnum/data2.idx")?;
     let index = ResourceIndex::read(f).unwrap();
 
-    let sounds = index.filter_by_type(AssetType::Sound);
+    let sounds = index.filter_by_type(AssetType::Music);
 
     for sound in &sounds {
         println!(

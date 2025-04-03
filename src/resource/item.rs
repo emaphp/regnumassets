@@ -7,13 +7,14 @@ use std::io::Read;
 pub struct ResourceIndexItem {
     pub uid: String,
     pub name: String,
+    pub char_name: Option<String>,
     pub start: u32,
     pub unknown: u32,
     pub size: u32,
 }
 
 impl ResourceIndexItem {
-    pub fn new<T: Read>(mut reader: T) -> Result<Self> {
+    pub fn read<T: Read>(mut reader: T) -> Result<Self> {
         // uid length
         let mut buffer = [0; 2];
         reader.read(&mut buffer)?;
@@ -63,18 +64,37 @@ impl ResourceIndexItem {
         let (name, _, _) = WINDOWS_1252.decode(&buffer);
         let name = name.into_owned();
 
-        // TODO: ???
-        let mut buffer = [0; 4];
+        // characters.idx adds the char name here
+        // play it "safe" and try to retrieve char name length
+        let mut buffer = [0; 2];
         reader.read(&mut buffer)?;
         let values = unsafe {
-            let (_, values, _) = buffer.align_to::<u32>();
+            let (_, values, _) = buffer.align_to::<u16>();
             values
         };
-        assert_eq!(values[0], 0);
+
+        let char_name = match values[0] {
+            0 => {
+                // we still need to point at the end of the next node
+                let mut buffer = [0; 2];
+                reader.read(&mut buffer)?;
+                None
+            }
+            len => {
+                let mut buffer = vec![0; len.into()];
+                reader.read(&mut buffer)?;
+                let (char_name, _, _) = WINDOWS_1252.decode(&buffer);
+                let char_name = char_name.into_owned();
+                let mut buffer = [0; 1];
+                reader.read(&mut buffer)?;
+                Some(char_name)
+            }
+        };
 
         Ok(Self {
             uid,
             name,
+            char_name,
             start,
             unknown,
             size,

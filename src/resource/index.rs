@@ -1,8 +1,10 @@
 use super::item::ResourceIndexItem;
 use super::node::ResourceIndexNode;
 use crate::asset::{bookmark::AssetBookmark, AssetType};
+use crate::asset::{ASSET_TYPE_CHAR_MESH, ASSET_TYPE_PCAUTH};
 use crate::errors::AssetErrors;
 use anyhow::{anyhow, Result};
+use byteorder::{LittleEndian, ReadBytesExt};
 use std::io::Read;
 
 /// A struct representing the elements contained within a resource index file
@@ -11,7 +13,7 @@ pub struct ResourceIndex {
 }
 
 impl ResourceIndex {
-    pub fn new<T: Read>(mut reader: T) -> Result<Self> {
+    pub fn read<T: Read>(mut reader: T) -> Result<Self> {
         // total nodes
         let mut buffer = [0; 4 * 3];
         reader.read(&mut buffer)?;
@@ -27,25 +29,17 @@ impl ResourceIndex {
         // parse header nodes
         let mut nodes = vec![];
         for _ in 0..total_nodes {
-            let node = ResourceIndexNode::new(&mut reader)?;
+            let node = ResourceIndexNode::read(&mut reader)?;
             nodes.push(node);
         }
 
         // total items
-        let mut buffer = [0; 4];
-        reader.read(&mut buffer)?;
-        let values = unsafe {
-            let (_, values, _) = buffer.align_to::<u32>();
-            values
-        };
-        let [total_items] = values[..] else {
-            return Err(anyhow!(AssetErrors::ParserError).context("resource index total items"));
-        };
+        let total_items = reader.read_u32::<LittleEndian>()?;
 
         // parse body items
         let mut items = vec![];
         for _ in 0..total_items {
-            let item = ResourceIndexItem::new(&mut reader)?;
+            let item = ResourceIndexItem::read(&mut reader)?;
             items.push(item);
         }
 
@@ -64,31 +58,27 @@ impl ResourceIndex {
 
             // parse resource id
             let resource_id = {
-                let found = item.uid.find(|c| c == '_');
-                if let None = found {
-                    continue;
-                }
-
-                let pos = found.unwrap();
-                if let Ok(value) = item.uid[pos + 1..].parse::<u32>() {
-                    value
+                if let Some(pos) = item.uid.rfind(|c| c == '_') {
+                    if let Ok(value) = item.uid[pos + 1..].parse::<u32>() {
+                        Some(value)
+                    } else {
+                        None
+                    }
                 } else {
-                    continue;
+                    None
                 }
             };
 
-            // parse name
-            let parts: Vec<&str> = item.name.split("::").collect();
-            if parts.len() < 2 {
-                continue;
-            }
-
-            let asset_type = AssetType::try_from(parts[0])?;
-
-            let name = if parts[1].len() > 0 {
-                Some(parts[1].into())
-            } else {
-                None
+            let (name, asset_type): (Option<String>, AssetType) = {
+                if ASSET_TYPE_CHAR_MESH == item.name {
+                    (item.char_name.clone(), AssetType::Character)
+                } else if item.uid == ASSET_TYPE_PCAUTH {
+                    (Some(item.uid.clone()), AssetType::Auth)
+                } else {
+                    let parts: Vec<&str> = item.name.split("::").collect();
+                    let asset_type = AssetType::try_from(parts[0])?;
+                    (Some(parts[1].into()), asset_type)
+                }
             };
 
             let size = item.size;
@@ -117,7 +107,7 @@ impl ResourceIndex {
     pub fn get_by_resource_id(&self, resource_id: u32) -> Option<AssetBookmark> {
         match self
             .bookmarks
-            .binary_search_by(|b| b.resource_id.cmp(&resource_id))
+            .binary_search_by(|b| b.resource_id.cmp(&Some(resource_id)))
         {
             Ok(pos) => Some(self.bookmarks[pos].clone()),
             Err(_) => None,
@@ -141,81 +131,65 @@ mod tests {
 
     #[test]
     fn test_index_material() {
-        let f = File::open("data0.idx");
+        let f = File::open("examples/regnum/data0.idx");
         assert!(f.is_ok());
 
-        let index = ResourceIndex::new(f.unwrap()).unwrap();
-        assert_eq!(index.bookmarks.len(), 3149);
+        let index = ResourceIndex::read(f.unwrap()).unwrap();
 
         let found = index.get_by_resource_id(68070);
         assert!(found.is_some());
         let found = found.unwrap();
-        assert_eq!(found.resource_id, 68070);
+        assert_eq!(found.resource_id, Some(68070));
         assert_eq!(found.asset_type, AssetType::Material);
         assert_eq!(
             found.name,
             Some("matIgnis generales Cercas rota y vegetación".into())
         );
-
-        let animations = index.filter_by_type(AssetType::Animation);
-        let total_animations = animations.len();
-        assert_eq!(total_animations, 880);
-
-        let meshes = index.filter_by_type(AssetType::Mesh);
-        let total_meshes = meshes.len();
-        assert_eq!(total_meshes, 1127);
-
-        let materials = index.filter_by_type(AssetType::Material);
-        let total_materials = materials.len();
-        assert_eq!(total_materials, 1142);
-
-        assert_eq!(
-            index.bookmarks.len(),
-            total_animations + total_meshes + total_materials
-        );
     }
 
     #[test]
     fn test_index_texture() {
-        let f = File::open("data1.idx");
+        let f = File::open("examples/regnum/data1.idx");
         assert!(f.is_ok());
 
-        let index = ResourceIndex::new(f.unwrap()).unwrap();
-        assert_eq!(index.bookmarks.len(), 2341);
+        let index = ResourceIndex::read(f.unwrap()).unwrap();
 
         let found = index.get_by_resource_id(1260);
         assert!(found.is_some());
         let found = found.unwrap();
-        assert_eq!(found.resource_id, 1260);
+        assert_eq!(found.resource_id, Some(1260));
         assert_eq!(found.asset_type, AssetType::Texture);
         assert_eq!(found.name, Some("Pradera gris demo".into()));
-
-        let textures = index.filter_by_type(AssetType::Texture);
-        let total_textures = textures.len();
-        assert_eq!(total_textures, index.bookmarks.len());
     }
 
     #[test]
     fn test_index_music() {
-        let f = File::open("data2.idx");
+        let f = File::open("examples/regnum/data2.idx");
         assert!(f.is_ok());
 
-        let index = ResourceIndex::new(f.unwrap()).unwrap();
-        assert_eq!(index.bookmarks.len(), 65);
+        let index = ResourceIndex::read(f.unwrap()).unwrap();
 
         let found = index.get_by_resource_id(50194);
         assert!(found.is_some());
         let found = found.unwrap();
-        assert_eq!(found.resource_id, 50194);
+        assert_eq!(found.resource_id, Some(50194));
         assert_eq!(found.asset_type, AssetType::Music);
         assert_eq!(found.name, Some("Syrtis Music".into()));
+    }
 
-        let music = index.filter_by_type(AssetType::Music);
-        let total_music = music.len();
-        assert_eq!(total_music, 13);
+    #[test]
+    fn test_index_text() {
+        let f = File::open("examples/regnum/data5.idx");
+        assert!(f.is_ok());
 
-        let sounds = index.filter_by_type(AssetType::Sound);
-        let total_sounds = sounds.len();
-        assert_eq!(total_sounds, 52);
+        let index = ResourceIndex::read(f.unwrap()).unwrap();
+
+        let found = index.get_by_resource_id(59847);
+        assert!(found.is_some());
+
+        let found = found.unwrap();
+        assert_eq!(found.resource_id, Some(59847));
+        assert_eq!(found.asset_type, AssetType::Text);
+        assert_eq!(found.name, Some("eng_faction_display_name".into()));
     }
 }

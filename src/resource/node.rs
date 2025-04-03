@@ -2,7 +2,7 @@ use crate::errors::AssetErrors;
 use anyhow::{anyhow, Context, Result};
 use std::io::Read;
 
-/// An index node contains the data representing a single asset node located in the resource index header
+/// A wrapper struct representing a single asset node located in the resource index header
 #[derive(Debug)]
 pub struct ResourceIndexNode {
     pub node_start: u32,
@@ -13,7 +13,7 @@ pub struct ResourceIndexNode {
 }
 
 impl ResourceIndexNode {
-    pub fn new<T: Read>(mut reader: T) -> Result<Self> {
+    pub fn read<T: Read>(mut reader: T) -> Result<Self> {
         let mut buffer = [0; 4 * 5];
         reader.read(&mut buffer)?;
 

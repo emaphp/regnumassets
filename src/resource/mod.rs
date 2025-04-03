@@ -2,11 +2,13 @@ pub mod index;
 pub mod item;
 pub mod node;
 
-/// An enum listing the different types of assets contained on a single file
+/// An enum listing all different types of assets within a single file
 pub enum ResourceType {
     MeshesAnimationsMaterials,
     Textures,
     MusicSound,
+    Text,
+    Characters,
 }
 
 /// An enum listing the different types of resource files
@@ -23,6 +25,8 @@ pub fn get_resource_filename(res_type: ResourceType, res_format: ResourceFormat)
             ResourceType::MeshesAnimationsMaterials => "data0",
             ResourceType::Textures => "data1",
             ResourceType::MusicSound => "data2",
+            ResourceType::Text => "data5",
+            ResourceType::Characters => "characters",
         },
         match res_format {
             ResourceFormat::IndexFile => "idx",
@@ -30,6 +34,7 @@ pub fn get_resource_filename(res_type: ResourceType, res_format: ResourceFormat)
         }
     )
 }
+
 #[cfg(test)]
 mod tests {
     use super::{get_resource_filename, ResourceFormat, ResourceType};
@@ -53,6 +58,16 @@ mod tests {
             get_resource_filename(ResourceType::MusicSound, ResourceFormat::IndexFile),
             "data2.idx"
         );
+
+        assert_eq!(
+            get_resource_filename(ResourceType::Text, ResourceFormat::IndexFile),
+            "data5.idx"
+        );
+
+        assert_eq!(
+            get_resource_filename(ResourceType::Characters, ResourceFormat::IndexFile),
+            "characters.idx"
+        );
     }
 
     #[test]
@@ -73,6 +88,16 @@ mod tests {
         assert_eq!(
             get_resource_filename(ResourceType::MusicSound, ResourceFormat::AssetDatabase),
             "data2.sdb"
+        );
+
+        assert_eq!(
+            get_resource_filename(ResourceType::Text, ResourceFormat::AssetDatabase),
+            "data5.sdb"
+        );
+
+        assert_eq!(
+            get_resource_filename(ResourceType::Characters, ResourceFormat::AssetDatabase),
+            "characters.sdb"
         );
     }
 }

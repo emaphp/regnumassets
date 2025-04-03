@@ -1,8 +1,9 @@
 use super::AssetType;
 
+/// An wrapper struct pointing to a specific asset in a database file
 #[derive(Debug, Clone)]
 pub struct AssetBookmark {
-    pub resource_id: u32,
+    pub resource_id: Option<u32>,
     pub asset_type: AssetType,
     pub name: Option<String>,
     pub node_start: usize,

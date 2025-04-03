@@ -1,6 +1,13 @@
-pub mod attribute;
 pub mod bookmark;
+pub mod content;
 pub mod data;
+pub mod sound;
+pub mod text;
+pub mod texture;
+
+pub use content::AssetContent;
+pub use text::content::{TextContent, TextNode};
+pub use text::WINDOWS_SEPARATOR;
 
 use crate::errors::AssetErrors;
 
@@ -15,21 +22,42 @@ pub const ASSET_TYPE_MATERIAL: &'static str = "MATERIAL";
 pub const ASSET_TYPE_ANIMATION: &'static str = "ANIMATION";
 /// A string used to identify a Mesh asset
 pub const ASSET_TYPE_MESH: &'static str = "MESH";
+/// A string used to identify an Image asset
+pub const ASSET_TYPE_IMAGE: &'static str = "IMAGE";
+/// A string used to identify a Text asset
+pub const ASSET_TYPE_TEXT: &'static str = "TEXT";
+/// A string used to identify a Binary asset
+pub const ASSET_TYPE_BINARY: &'static str = "BINARY";
 /// A string used to identify a Texture asset
 pub const ASSET_TYPE_TEXTURE: &'static str = "TEXTURE";
+/// A string used to identify a Font asset
+pub const ASSET_TYPE_FONT: &'static str = "FONT";
+/// A string used to identify an Effect asset
+pub const ASSET_TYPE_EFFECT: &'static str = "EFFECT";
 /// A string used to identify a Sound asset
 pub const ASSET_TYPE_SOUND: &'static str = "SOUND";
 /// A string used to identify a Music asset
 pub const ASSET_TYPE_MUSIC: &'static str = "MUSIC";
+/// A string used to identify a character mesh
+pub const ASSET_TYPE_CHAR_MESH: &'static str = "mesh";
+/// ???
+pub const ASSET_TYPE_PCAUTH: &'static str = "pcauth";
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AssetType {
     Material,
     Animation,
     Mesh,
+    Image,
+    Text,
+    Binary,
     Texture,
+    Font,
+    Effect,
     Music,
     Sound,
+    Character,
+    Auth,
 }
 
 impl TryFrom<&str> for AssetType {
@@ -40,9 +68,15 @@ impl TryFrom<&str> for AssetType {
             ASSET_TYPE_MATERIAL => Ok(Self::Material),
             ASSET_TYPE_ANIMATION => Ok(Self::Animation),
             ASSET_TYPE_MESH => Ok(Self::Mesh),
+            ASSET_TYPE_IMAGE => Ok(Self::Image),
+            ASSET_TYPE_TEXT => Ok(Self::Text),
+            ASSET_TYPE_BINARY => Ok(Self::Binary),
             ASSET_TYPE_TEXTURE => Ok(Self::Texture),
+            ASSET_TYPE_EFFECT => Ok(Self::Effect),
+            ASSET_TYPE_FONT => Ok(Self::Font),
             ASSET_TYPE_SOUND => Ok(Self::Sound),
             ASSET_TYPE_MUSIC => Ok(Self::Music),
+            ASSET_TYPE_CHAR_MESH => Ok(Self::Character),
             unknown => Err(anyhow::anyhow!(AssetErrors::UnknownAssetTypeError(
                 unknown.to_owned()
             ))),
@@ -56,9 +90,16 @@ impl Into<&str> for AssetType {
             Self::Material => ASSET_TYPE_MATERIAL,
             Self::Animation => ASSET_TYPE_ANIMATION,
             Self::Mesh => ASSET_TYPE_MESH,
+            Self::Image => ASSET_TYPE_IMAGE,
+            Self::Text => ASSET_TYPE_TEXT,
+            Self::Binary => ASSET_TYPE_BINARY,
             Self::Texture => ASSET_TYPE_TEXTURE,
+            Self::Effect => ASSET_TYPE_EFFECT,
+            Self::Font => ASSET_TYPE_FONT,
             Self::Sound => ASSET_TYPE_SOUND,
             Self::Music => ASSET_TYPE_MUSIC,
+            Self::Character => ASSET_TYPE_CHAR_MESH,
+            Self::Auth => ASSET_TYPE_PCAUTH,
         }
     }
 }

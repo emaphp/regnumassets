@@ -1,199 +1,181 @@
-use super::attribute::{read_attribute, AssetAttribute};
 use super::bookmark::AssetBookmark;
 use super::{AssetType, ASSET_NODE_START};
-use crate::errors::AssetErrors;
-use anyhow::{anyhow, Result};
+use crate::AssetContent;
+use anyhow::Result;
+use byteorder::{LittleEndian, ReadBytesExt};
+use encoding_rs::WINDOWS_1252;
 use std::io::{Read, Seek, SeekFrom};
 
-/// A struct containing the data retrieved from an asset database file
-#[derive(Default, Clone)]
+/// A wrapper struct containing the data retrieved from the asset database file
 pub struct AssetData {
-    pub asset_type: Option<AssetType>,
+    /// The asset type
+    pub asset_type: AssetType,
+    /// A string with the form 'resource_...'
+    pub uid: String,
+    /// A string with the form 'TYPE::NAME'
+    pub resource_name: String,
+    /// The asset name
+    pub asset_name: String,
+    /// An unique identifier
     pub resource_id: u32,
-    pub filename: Option<String>,
-    pub bytes: Option<Vec<u8>>,
-    pub size: Option<u32>,
-    pub animation: Option<String>,
-    pub mesh: Option<String>,
-    pub texture: Option<String>,
-    pub material: Option<String>,
-    pub music: Option<String>,
-    pub sound: Option<String>,
+    /// The actual content
+    pub content: AssetContent,
+
+    // TODO
+    _unknown: u32,
+    _unknown2: [u8; 16],
+    _unknown3: [u8; 16],
+    _unknown4: u32,
+    _maybe_size: u32,
 }
 
 impl AssetData {
-    pub fn new<T: Read + Seek>(mut reader: T, bookmark: &AssetBookmark) -> Result<Self> {
+    pub fn read<T: Read + Seek>(mut reader: T, bookmark: &AssetBookmark) -> Result<Self> {
         let pos = bookmark.node_end;
         reader.seek(SeekFrom::Start(pos as u64))?;
 
+        // PAIR string
         let mut buffer = vec![0; 4];
         reader.read(&mut buffer)?;
         let node = String::from_utf8(buffer).unwrap();
         assert_eq!(node, ASSET_NODE_START);
 
         // TODO: ???
-        let mut buffer = [0; 4];
-        reader.read(&mut buffer)?;
+        let unknown = reader.read_u32::<LittleEndian>()?;
 
         // uid length
-        let mut buffer = [0; 1];
-        reader.read(&mut buffer)?;
-        let [length] = buffer[..] else {
-            return Err(anyhow!(AssetErrors::ParserError).context("asset data uid length"));
-        };
-
-        // TODO: ??
-        let mut buffer = [0; 16];
-        reader.read(&mut buffer)?;
-
-        // uid
-        let mut buffer = vec![0; length as usize];
-        reader.read(&mut buffer)?;
-
-        // name length
-        let mut buffer = [0; 1];
-        reader.read(&mut buffer)?;
-        let [length] = buffer[..] else {
-            return Err(anyhow!(AssetErrors::ParserError).context("asset data name length"));
-        };
-
-        // name
-        let mut buffer = vec![0; length as usize];
-        reader.read(&mut buffer)?;
+        let uid_length = reader.read_u8()?;
 
         // TODO: ???
+        let mut unknown2 = [0; 16];
+        reader.read(&mut unknown2)?;
+
+        // uid
+        let mut buffer = vec![0; uid_length as usize];
+        reader.read(&mut buffer)?;
+        let uid = String::from_utf8(buffer)?;
+
+        // resource name length
+        let resource_name_length = reader.read_u8()?;
+
+        // resource name
+        let mut buffer = vec![0; resource_name_length as usize];
+        reader.read(&mut buffer)?;
+        let (resource_name, _, _) = WINDOWS_1252.decode(&buffer);
+        let resource_name = resource_name.into_owned();
+
+        // separator
         let mut buffer = [0; 4];
         reader.read(&mut buffer)?;
         assert_eq!(buffer, [0, 0, 0, 0]);
 
-        // size
+        // TODO: size?
+        let maybe_size = reader.read_u32::<LittleEndian>()?;
+        assert_eq!(maybe_size, bookmark.size);
+
+        // TODO: ???
+        let mut unknown3 = [0; 16];
+        reader.read(&mut unknown3)?;
+
+        // TODO: ???
         let mut buffer = [0; 4];
         reader.read(&mut buffer)?;
-        let size = unsafe {
-            let (_, values, _) = buffer.align_to::<u32>();
-            values[0]
-        };
-        assert_eq!(size, bookmark.size);
+        assert_eq!(buffer, [1, 0, 0, 0]);
 
-        // some attributes contain binary data that has yet to be reversed
-        // these are generally at the end
-        // we can bypass them by moving to the end position,
-        // which should contain the "RIAP" string
-        let the_end = reader.stream_position().unwrap() + size as u64 + 16u64;
+        // resource id
+        let resource_id = reader.read_u32::<LittleEndian>()?;
+
+        // TODO: ???
+        let unknown4 = reader.read_u32::<LittleEndian>()?;
+
+        // asset type length
+        let asset_type_length = reader.read_u32::<LittleEndian>()?;
+
+        // asset type
+        let mut buffer = vec![0; asset_type_length as usize];
+        reader.read(&mut buffer)?;
+
+        // asset name length
+        let asset_name_length = reader.read_u32::<LittleEndian>()?;
+
+        // asset name
+        let mut buffer = vec![0; asset_name_length as usize];
+        reader.read(&mut buffer)?;
+        let (asset_name, _, _) = WINDOWS_1252.decode(&buffer);
+        let asset_name = asset_name.into_owned();
 
         // TODO: ???
         let mut buffer = [0; 16];
         reader.read(&mut buffer)?;
 
-        let mut asset = AssetData::default();
-        let limit = bookmark.node_next as u64 - 4;
+        let content = AssetContent::read(reader, bookmark)?;
 
-        loop {
-            // fail-safe exit
-            let pos = reader.stream_position()?;
-            if pos >= limit {
-                break;
-            }
-
-            let attr = read_attribute(&mut reader)?;
-
-            match attr {
-                AssetAttribute::Blank => {}
-                AssetAttribute::Start {
-                    resource_id,
-                    unknown: _,
-                } => {
-                    asset.resource_id = resource_id;
-                }
-                AssetAttribute::End => {
-                    break;
-                }
-                AssetAttribute::Animation(animation) => {
-                    asset.animation = Some(animation);
-                    reader.seek(SeekFrom::Start(the_end))?;
-                }
-                AssetAttribute::Mesh(mesh) => {
-                    asset.mesh = Some(mesh);
-                    reader.seek(SeekFrom::Start(the_end))?;
-                }
-                AssetAttribute::Material(material) => {
-                    asset.material = Some(material);
-                    reader.seek(SeekFrom::Start(the_end))?;
-                }
-                AssetAttribute::Texture(texture) => {
-                    asset.texture = Some(texture);
-                    reader.seek(SeekFrom::Start(the_end))?;
-                }
-                AssetAttribute::Sound(sound) => {
-                    asset.sound = Some(sound);
-                }
-                AssetAttribute::Music(music) => {
-                    asset.music = Some(music);
-                }
-                AssetAttribute::Filename(filename) => {
-                    asset.filename = Some(filename);
-                }
-                AssetAttribute::Content { size, bytes } => {
-                    asset.size = Some(size);
-                    asset.bytes = Some(bytes);
-                }
-            }
-        }
-
-        asset.asset_type = {
-            if let Some(_) = &asset.texture {
-                Some(AssetType::Texture)
-            } else if let Some(_) = &asset.animation {
-                Some(AssetType::Animation)
-            } else if let Some(_) = &asset.mesh {
-                Some(AssetType::Mesh)
-            } else if let Some(_) = &asset.material {
-                Some(AssetType::Material)
-            } else if let Some(_) = &asset.sound {
-                Some(AssetType::Sound)
-            } else if let Some(_) = &asset.music {
-                Some(AssetType::Music)
-            } else {
-                None
-            }
-        };
-
-        Ok(asset)
+        Ok(AssetData {
+            asset_type: bookmark.asset_type.clone(),
+            uid,
+            resource_id,
+            resource_name,
+            asset_name,
+            content,
+            _unknown: unknown,
+            _unknown2: unknown2,
+            _unknown3: unknown3,
+            _unknown4: unknown4,
+            _maybe_size: maybe_size,
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::{AssetData, AssetType, ResourceIndex};
+    use crate::{AssetContent, AssetData, AssetType, ResourceIndex};
     use std::fs::File;
 
     #[test]
     fn test_music_database() {
-        let f = File::open("data2.idx");
+        let f = File::open("examples/regnum/data2.idx");
         assert!(f.is_ok());
 
-        let index = ResourceIndex::new(f.unwrap()).unwrap();
-        let music = index.bookmarks.get(2).unwrap();
-        let sound = index.bookmarks.get(4).unwrap();
+        let index = ResourceIndex::read(f.unwrap()).unwrap();
+        let music = index.get_by_resource_id(56934).unwrap();
+        let sound = index.get_by_resource_id(50677).unwrap();
 
-        let f = File::open("data2.sdb");
+        let f = File::open("examples/regnum/data2.sdb");
         assert!(f.is_ok());
         let f = f.unwrap();
 
-        let asset = AssetData::new(&f, &music).unwrap();
-        assert_eq!(asset.asset_type, Some(AssetType::Music));
-        assert_eq!(asset.resource_id, 50203);
-        assert_eq!(asset.size, Some(1697043));
-        assert_eq!(asset.filename, Some("regnum_combat2.ogg".into()));
-        assert_eq!(asset.music, Some("regnum_combat_2".into()));
-        assert_eq!(asset.sound, None);
+        let asset = AssetData::read(&f, &music).unwrap();
+        assert_eq!(asset.asset_type, AssetType::Music);
+        assert_eq!(asset.resource_id, 56934);
 
-        let asset = AssetData::new(&f, &sound).unwrap();
-        assert_eq!(asset.asset_type, Some(AssetType::Sound));
+        match asset.content {
+            AssetContent::Sound {
+                filename,
+                bytes: _b,
+                size: _s,
+            } => {
+                assert_eq!(filename, ("regnum_ignis.ogg"));
+            }
+            _ => {
+                //
+            }
+        }
+
+        let asset = AssetData::read(&f, &sound).unwrap();
+        assert_eq!(asset.asset_type, (AssetType::Sound));
         assert_eq!(asset.resource_id, 50677);
-        assert_eq!(asset.size, Some(12703));
-        assert_eq!(asset.filename, Some("combat_pain_male_3.ogg".into()));
-        assert_eq!(asset.music, None);
-        assert_eq!(asset.sound, Some("Combat pain male 3".into()));
+
+        match asset.content {
+            AssetContent::Sound {
+                filename,
+                bytes: _b,
+                size: _s,
+            } => {
+                assert_eq!(filename, ("combat_pain_male_3.ogg"));
+            }
+            _ => {
+                //
+            }
+        }
     }
 }

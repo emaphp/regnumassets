@@ -40,6 +40,12 @@ pub const ASSET_TYPE_SOUND: &'static str = "SOUND";
 pub const ASSET_TYPE_MUSIC: &'static str = "MUSIC";
 /// A string used to identify a character mesh
 pub const ASSET_TYPE_CHAR_MESH: &'static str = "mesh";
+/// A string used to identify a MapObject asset
+pub const ASSET_TYPE_MAPOBJECT: &'static str = "MAPOBJECT";
+/// A string used to identify a TerrainRegion asset
+pub const ASSET_TYPE_TERRAIN_REGION: &'static str = "TERRAIN_REGION";
+/// A string used to identify a WorldMap asset
+pub const ASSET_TYPE_WORLDMAP: &'static str = "WORLDMAP";
 /// ???
 pub const ASSET_TYPE_PCAUTH: &'static str = "pcauth";
 
@@ -58,6 +64,9 @@ pub enum AssetType {
     Sound,
     Character,
     Auth,
+    MapObject,
+    TerrainRegion,
+    WorldMap,
 }
 
 impl TryFrom<&str> for AssetType {
@@ -77,6 +86,9 @@ impl TryFrom<&str> for AssetType {
             ASSET_TYPE_SOUND => Ok(Self::Sound),
             ASSET_TYPE_MUSIC => Ok(Self::Music),
             ASSET_TYPE_CHAR_MESH => Ok(Self::Character),
+            ASSET_TYPE_MAPOBJECT => Ok(Self::MapObject),
+            ASSET_TYPE_TERRAIN_REGION => Ok(Self::TerrainRegion),
+            ASSET_TYPE_WORLDMAP => Ok(Self::WorldMap),
             unknown => Err(anyhow::anyhow!(AssetErrors::UnknownAssetTypeError(
                 unknown.to_owned()
             ))),
@@ -99,6 +111,9 @@ impl Into<&str> for AssetType {
             Self::Sound => ASSET_TYPE_SOUND,
             Self::Music => ASSET_TYPE_MUSIC,
             Self::Character => ASSET_TYPE_CHAR_MESH,
+            Self::MapObject => ASSET_TYPE_MAPOBJECT,
+            Self::TerrainRegion => ASSET_TYPE_TERRAIN_REGION,
+            Self::WorldMap => ASSET_TYPE_WORLDMAP,
             Self::Auth => ASSET_TYPE_PCAUTH,
         }
     }

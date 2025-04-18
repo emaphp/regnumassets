@@ -100,6 +100,8 @@ pub enum AssetContent {
     Texture { width: u32, height: u32, dds: Dds },
     /// A variant holding a list of text components
     Text { contents: Vec<TextContent> },
+    /// A variant holding a JPEG image
+    Image { bytes: Vec<u8> },
     /// A variant indicating a not-supported content
     NotSupported,
 }
@@ -243,6 +245,42 @@ fn main() -> Result<()> {
         }
         _ => {
             println!("this content is not supported")
+        }
+    }
+
+    Ok(())
+}
+```
+
+#### Image ####
+
+Images are stored using the `JPEG` (`JFIF`) format. These assets are exported as slices of bytes.
+
+```rust
+use anyhow::Result;
+use regnumassets::{AssetContent, AssetData, ResourceIndex};
+use std::fs::File;
+use std::io::Write;
+
+fn main() -> Result<()> {
+    let f = File::open("data5.idx")?;
+    let index = ResourceIndex::read(f).unwrap();
+
+    let image = index.get_by_resource_id(75879).unwrap();
+
+    let f = File::open("data5.sdb")?;
+    let asset = AssetData::read(&f, &image).unwrap();
+
+    match asset.content {
+        AssetContent::Image { bytes } => {
+            let filename = "out.jpeg";
+            println!("writing file to {}", filename);
+            let mut output = File::create(filename)?;
+            output.write_all(bytes.as_ref())?;
+            output.flush()?;
+        }
+        _ => {
+            println!("couuld not parse image asset")
         }
     }
 

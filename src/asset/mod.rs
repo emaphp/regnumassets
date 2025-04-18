@@ -1,6 +1,7 @@
 pub mod bookmark;
 pub mod content;
 pub mod data;
+pub mod image;
 pub mod sound;
 pub mod text;
 pub mod texture;

@@ -1,4 +1,5 @@
 use super::WINDOWS_SEPARATOR;
+use crate::asset::image::{find_last_sequence, JPEG_END};
 use crate::asset::sound::{SOUND_ATTR_FILEINBUFFER, SOUND_ATTR_FILENAME};
 use crate::asset::text::{parse_text, TextContent};
 use crate::{asset::ASSET_NODE_END, errors::AssetErrors, AssetBookmark, AssetType};
@@ -21,6 +22,8 @@ pub enum AssetContent {
     Texture { width: u32, height: u32, dds: Dds },
     /// A variant holding a list of text components
     Text { contents: Vec<TextContent> },
+    /// A variant holding a JPEG image
+    Image { bytes: Vec<u8> },
     /// A variant indicating a not-supported content
     NotSupported,
 }
@@ -32,9 +35,31 @@ impl AssetContent {
             AssetType::Text => Self::read_text(reader, bookmark),
             AssetType::Sound | AssetType::Music => Self::read_sound(reader, bookmark),
             AssetType::Texture => Self::read_texture(reader, bookmark),
+            AssetType::Image => Self::read_image(reader, bookmark),
             _ => Ok(AssetContent::NotSupported),
         };
         content
+    }
+
+    /// Tries to convert a value to a AssetContent::Image variant
+    pub fn read_image<T: Read + Seek>(
+        mut reader: T,
+        bookmark: &AssetBookmark,
+    ) -> Result<AssetContent> {
+        // this is always bigger than the actual asset size
+        // pulling data from this position will put us out of bounds
+        let size = bookmark.size;
+        let mut data = vec![0; size as usize];
+        reader.read(&mut data)?;
+
+        if let Some(pos) = find_last_sequence(&data, &JPEG_END) {
+            let end = pos + 2; // add remaining bytes
+            data.resize(end, 0x00);
+
+            return Ok(AssetContent::Image { bytes: data });
+        }
+
+        Ok(Self::NotSupported)
     }
 
     /// Tries to convert a value to a AssetContent::Texture variant

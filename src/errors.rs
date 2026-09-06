@@ -9,7 +9,7 @@ pub enum AssetErrors {
 impl std::fmt::Display for AssetErrors {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::ParserError => write!(f, "Could not align data to the the expected format"),
+            Self::ParserError => write!(f, "Could not align data to the expected format"),
             Self::UnknownAssetTypeError(asset_type) => {
                 write!(f, "unknown asset type: {}", asset_type)
             }

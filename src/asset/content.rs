@@ -1,4 +1,5 @@
 use super::WINDOWS_SEPARATOR;
+use crate::asset::font;
 use crate::asset::image::{find_last_sequence, JPEG_END};
 use crate::asset::sound::{SOUND_ATTR_FILEINBUFFER, SOUND_ATTR_FILENAME};
 use crate::asset::text::{parse_text, TextContent};
@@ -7,10 +8,9 @@ use anyhow::{anyhow, Result};
 use byteorder::{LittleEndian, ReadBytesExt};
 use ddsfile::Dds;
 use encoding_rs::WINDOWS_1252;
-use std::io::{Read, Seek};
+use std::io::{Read, Seek, Write};
 
 /// An enum listing all supported content types found on a database file
-#[derive(Debug)]
 pub enum AssetContent {
     /// A variant holding a OGG file
     Sound {
@@ -24,6 +24,8 @@ pub enum AssetContent {
     Text { contents: Vec<TextContent> },
     /// A variant holding a JPEG image
     Image { bytes: Vec<u8> },
+    /// A variant holding a TrueType Font
+    Font(font::Font),
     /// A variant indicating a not-supported content
     NotSupported,
 }
@@ -36,9 +38,25 @@ impl AssetContent {
             AssetType::Sound | AssetType::Music => Self::read_sound(reader, bookmark),
             AssetType::Texture => Self::read_texture(reader, bookmark),
             AssetType::Image => Self::read_image(reader, bookmark),
+            AssetType::Font => Self::read_font(reader, bookmark),
             _ => Ok(AssetContent::NotSupported),
         };
         content
+    }
+
+    /// Tries to convert a value to a AssetContent::Font variant
+    pub fn read_font<T: Read + Seek>(
+        mut reader: T,
+        bookmark: &AssetBookmark,
+    ) -> Result<AssetContent> {
+        let size = bookmark.size;
+
+        match font::parse_font(reader, size as u64) {
+            Err(e) => Err(anyhow!(AssetErrors::ParserError).context(e)),
+            Ok(f) => {
+                return Ok(AssetContent::Font(f));
+            }
+        }
     }
 
     /// Tries to convert a value to a AssetContent::Image variant

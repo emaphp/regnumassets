@@ -1,12 +1,14 @@
 pub mod bookmark;
 pub mod content;
 pub mod data;
+pub mod font;
 pub mod image;
 pub mod sound;
 pub mod text;
 pub mod texture;
 
 pub use content::AssetContent;
+pub use font::Font;
 pub use text::content::{TextContent, TextNode};
 pub use text::WINDOWS_SEPARATOR;
 

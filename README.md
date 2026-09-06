@@ -17,6 +17,8 @@ Table of Contents
 
 This crate provides a set of tools for parsing/extracting asset files from your local installation of *Champions of Regnum*.
 
+ > **IMPORTANT**: The content this library provides access to is copyrighted material. They either belong to Nimble Giant Entertainment or other third parties. This crate is not intended to violate any copyright laws. Make a fair and discrete use of this library.
+
 ### Basic Usage ###
 
 *Champions of Regnum* comes with 2 types of asset files: *index* files and *database* files. Both of these files are located in the game installation folder and use the `.idx` and `.sdb` extensions respectively. Each file contains a given set of asset files, that could be either sounds, music, textures, etc. For each index file there's a corresponding database files. Index files do not include the assets but provide information on how to retrieve a given asset from the database file.
@@ -65,6 +67,9 @@ pub enum AssetType {
     Sound,
     Character,
     Auth,
+    MapObject,
+    TerrainRegion,
+    WorldMap,
 }
 ```
 
@@ -89,6 +94,9 @@ fn main() -> Result<()> {
 The `AssetData` struct includes a `content` property that contains the actual asset. This enum type defines a variant for each supported type. Types that are not currently supported will always generate a value of type `AssetContent::NotSupported`.
 
 ```rust
+use crate::asset::text::TextContent;
+use crate::asset::font::Font;
+
 pub enum AssetContent {
     /// A variant holding an Ogg Vorbis file
     Sound {
@@ -102,6 +110,8 @@ pub enum AssetContent {
     Text { contents: Vec<TextContent> },
     /// A variant holding a JPEG image
     Image { bytes: Vec<u8> },
+    /// A variant holding a font
+    Font(font::Font),
     /// A variant indicating a not-supported content
     NotSupported,
 }
@@ -287,6 +297,27 @@ fn main() -> Result<()> {
     Ok(())
 }
 ```
+
+#### Fonts ####
+
+Fonts come in 4 different variants:
+
+```rust
+pub enum Font {
+    /// Game bitmap font: zlib-compressed glyph atlas.
+    ///
+    /// `bytes` holds a complete zlib stream.
+    FontBlob { bytes: Vec<u8>, height: u32 },
+    /// TrueType font
+    TrueType(Vec<u8>),
+    /// OpenType font using CFF outlines (magic 'OTTO')
+    OpenType(Vec<u8>),
+    /// Truetype font collection
+    FontCollection { faces: u32, bytes: Vec<u8> },
+}
+```
+
+All variants except `FontBlob` can be exported to its corresponding extension (`.otf`/`ttf`/`ttc`). Bytes in a `FontBlob` variant will require something like [miniz_oxide](https://docs.rs/miniz_oxide/latest/miniz_oxide) to obtain the original bitmap font.
 
 ### License ###
 

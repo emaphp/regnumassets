@@ -1,0 +1,612 @@
+use anyhow::Result;
+use byteorder::{LittleEndian, ReadBytesExt};
+use crossterm::{
+    event::{self, DisableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers},
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+};
+use ratatui::{
+    prelude::*,
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Tabs, Wrap},
+};
+use regnumassets::{AssetBookmark, AssetContent, AssetData, AssetType, ResourceIndex};
+use std::{
+    fs::File,
+    io::{Read, Seek, SeekFrom},
+    path::{Path, PathBuf},
+};
+
+/// Maximum amount of payload bytes shown in the hexdump pane
+const HEXDUMP_MAX_BYTES: u64 = 1024;
+
+const ALL_TYPES: [Option<AssetType>; 17] = [
+    None,
+    Some(AssetType::Material),
+    Some(AssetType::Animation),
+    Some(AssetType::Mesh),
+    Some(AssetType::Image),
+    Some(AssetType::Text),
+    Some(AssetType::Binary),
+    Some(AssetType::Texture),
+    Some(AssetType::Font),
+    Some(AssetType::Effect),
+    Some(AssetType::Music),
+    Some(AssetType::Sound),
+    Some(AssetType::Character),
+    Some(AssetType::Auth),
+    Some(AssetType::MapObject),
+    Some(AssetType::TerrainRegion),
+    Some(AssetType::WorldMap),
+];
+
+fn type_label(filter: &Option<AssetType>) -> String {
+    match filter {
+        None => "All".into(),
+        Some(t) => {
+            let s: &str = t.clone().into();
+            s.to_string()
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Focus {
+    List,
+    Hexdump,
+}
+
+struct Hexdump {
+    /// raw payload bytes (may be capped to HEXDUMP_MAX_BYTES)
+    bytes: Vec<u8>,
+    /// file offset of bytes[0]
+    base: u64,
+    /// full payload size
+    total: u32,
+    /// first visible row
+    scroll: usize,
+}
+
+struct Database {
+    sdb_path: PathBuf,
+}
+
+struct Entry {
+    bookmark: AssetBookmark,
+    db: usize,
+}
+
+struct App {
+    databases: Vec<Database>,
+    entries: Vec<Entry>,
+    filter_index: usize,
+    list_state: ListState,
+    focus: Focus,
+    detail: Option<Vec<Line<'static>>>,
+    hexdump: Option<Result<Hexdump, String>>,
+    status: String,
+}
+
+impl App {
+    fn load(dir: &Path) -> Result<Self> {
+        let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().map(|ext| ext == "idx").unwrap_or(false))
+            .collect();
+        paths.sort();
+
+        if paths.is_empty() {
+            anyhow::bail!("no index files found in {}", dir.display());
+        }
+
+        let mut databases = vec![];
+        let mut entries = vec![];
+        for idx_path in paths {
+            let sdb_path = idx_path.with_extension("sdb");
+            if !sdb_path.exists() {
+                continue;
+            }
+            let index = ResourceIndex::read(File::open(&idx_path)?)?;
+            for bookmark in &index.bookmarks {
+                entries.push(Entry {
+                    bookmark: bookmark.clone(),
+                    db: databases.len(),
+                });
+            }
+            databases.push(Database { sdb_path });
+        }
+
+        let status = format!("loaded {} assets", entries.len());
+        let mut app = App {
+            databases,
+            entries,
+            filter_index: 0,
+            list_state: ListState::default(),
+            focus: Focus::List,
+            detail: None,
+            hexdump: None,
+            status,
+        };
+        app.apply_filter();
+        Ok(app)
+    }
+
+    fn filtered(&self) -> Vec<&Entry> {
+        let filter = &ALL_TYPES[self.filter_index];
+        self.entries
+            .iter()
+            .filter(|e| filter.as_ref().map_or(true, |t| e.bookmark.asset_type == *t))
+            .collect()
+    }
+
+    fn apply_filter(&mut self) {
+        let len = self.filtered().len();
+        self.list_state = ListState::default();
+        if len > 0 {
+            self.list_state.select(Some(0));
+        }
+        self.detail = None;
+        self.hexdump = None;
+        self.status = format!("{} assets ({} shown)", self.entries.len(), len);
+    }
+
+    fn selected(&self) -> Option<&Entry> {
+        self.list_state
+            .selected()
+            .and_then(|i| self.filtered().get(i).copied())
+    }
+
+    fn move_cursor(&mut self, delta: isize) {
+        let len = self.filtered().len();
+        if len == 0 {
+            return;
+        }
+        let current = self.list_state.selected().unwrap_or(0) as isize;
+        let next = (current + delta).clamp(0, len as isize - 1);
+        self.list_state.select(Some(next as usize));
+        self.detail = None;
+        self.hexdump = None;
+    }
+
+    fn toggle_focus(&mut self) {
+        if self.hexdump.is_some() {
+            self.focus = match self.focus {
+                Focus::List => Focus::Hexdump,
+                Focus::Hexdump => Focus::List,
+            };
+        }
+    }
+
+    fn scroll_hexdump(&mut self, delta: isize) {
+        if let Some(Ok(hex)) = self.hexdump.as_mut() {
+            hex.scroll = (hex.scroll as isize + delta).max(0) as usize;
+        }
+    }
+
+    fn read_selected(&mut self) {
+        let Some(entry) = self.selected() else {
+            return;
+        };
+        let bookmark = entry.bookmark.clone();
+        let closure_bookmark = bookmark.clone();
+        let db_path = self.databases[entry.db].sdb_path.clone();
+        let closure_db_path = db_path.clone();
+
+        // the asset parsers use assertions internally, so a badly-parsed
+        // asset may panic; catch it instead of taking the whole TUI down
+        let default_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let result: Result<AssetData> = std::panic::catch_unwind(move || {
+            File::open(&closure_db_path)
+                .map_err(anyhow::Error::from)
+                .and_then(|f| AssetData::read(f, &closure_bookmark))
+        })
+        .unwrap_or_else(|_| Err(anyhow::anyhow!("the asset parser panicked")));
+        std::panic::set_hook(default_hook);
+
+        // hexdump does not need the parser; read the raw payload directly
+        self.hexdump = Some(
+            read_payload_head(&db_path, &bookmark).map_err(|e| e.to_string()),
+        );
+
+        self.status = if result.is_ok() { "asset read".into() } else { "asset read failed".into() };
+        let lines: Vec<Line<'static>> = match result {
+            Err(e) => vec![
+                Line::from("Failed to read asset".bold().red()),
+                Line::from(e.to_string()),
+            ],
+            Ok(data) => {
+                let asset_type: &str = data.asset_type.clone().into();
+                vec![
+                Line::from("Details".bold()),
+                Line::from(format!("resource id: {}", data.resource_id)),
+                Line::from(format!("asset type:  {}", asset_type)),
+                Line::from(format!("asset name:  {}", data.asset_name)),
+                Line::from(format!("uid:         {}", data.uid)),
+                Line::from(format!("size:        {}", format_size(bookmark.size))),
+                Line::from(""),
+                Line::from("Content".bold()),
+                Line::from(describe_content(&data.content)),
+            ]
+            }
+        };
+        self.detail = Some(lines);
+    }
+
+    fn next_filter(&mut self, delta: isize) {
+        let len = ALL_TYPES.len() as isize;
+        self.filter_index = ((self.filter_index as isize + delta).rem_euclid(len)) as usize;
+        self.apply_filter();
+    }
+}
+
+/// Reads the first HEXDUMP_MAX_BYTES of an asset payload directly from the
+/// database file, walking the asset node header without using the parser.
+fn read_payload_head(db_path: &Path, bookmark: &AssetBookmark) -> Result<Hexdump> {
+    fn skip<T: Read>(reader: &mut T, n: u64) -> Result<()> {
+        std::io::copy(&mut reader.by_ref().take(n), &mut std::io::sink())?;
+        Ok(())
+    }
+
+    let mut reader = File::open(db_path)?;
+    reader.seek(SeekFrom::Start(bookmark.node_end as u64))?;
+
+    // node marker
+    let mut marker = [0u8; 4];
+    reader.read_exact(&mut marker)?;
+    if &marker != b"PAIR" {
+        anyhow::bail!("unexpected node marker");
+    }
+
+    skip(&mut reader, 4)?; // unknown u32
+    let uid_length = reader.read_u8()?;
+    skip(&mut reader, 16)?; // unknown
+    skip(&mut reader, uid_length as u64)?; // uid
+    let resource_name_length = reader.read_u8()?;
+    skip(&mut reader, resource_name_length as u64)?; // resource name
+    skip(&mut reader, 4)?; // separator
+    skip(&mut reader, 4)?; // payload size (we already know it)
+    skip(&mut reader, 16)?; // unknown
+    skip(&mut reader, 4)?; // unknown u32
+    skip(&mut reader, 4)?; // resource id
+    skip(&mut reader, 4)?; // unknown u32
+    let asset_type_length = reader.read_u32::<LittleEndian>()?;
+    skip(&mut reader, asset_type_length as u64)?; // asset type
+    let asset_name_length = reader.read_u32::<LittleEndian>()?;
+    skip(&mut reader, asset_name_length as u64)?; // asset name
+    skip(&mut reader, 16)?; // unknown
+
+    let base = reader.stream_position()?;
+    let to_read = (bookmark.size as u64).min(HEXDUMP_MAX_BYTES);
+    let mut bytes = Vec::with_capacity(to_read as usize);
+    reader
+        .by_ref()
+        .take(to_read)
+        .read_to_end(&mut bytes)?;
+
+    if bytes.is_empty() {
+        anyhow::bail!("empty payload");
+    }
+
+    Ok(Hexdump {
+        bytes,
+        base,
+        total: bookmark.size,
+        scroll: 0,
+    })
+}
+
+fn describe_content(content: &AssetContent) -> String {
+    match content {
+        AssetContent::Sound { filename, size, .. } => {
+            format!("Ogg Vorbis: '{}' ({} bytes)", filename, size)
+        }
+        AssetContent::Texture { width, height, .. } => {
+            format!("DDS texture: {}x{}", width, height)
+        }
+        AssetContent::Text { contents } => {
+            format!("Text asset: {} component(s)", contents.len())
+        }
+        AssetContent::Image { bytes } => {
+            format!("JPEG image ({} bytes)", bytes.len())
+        }
+        AssetContent::Font(font) => match font {
+            regnumassets::asset::font::Font::FontBlob { height, .. } => {
+                format!("Game font blob (height {})", height)
+            }
+            regnumassets::asset::font::Font::TrueType(bytes) => {
+                format!("TrueType font ({} bytes)", bytes.len())
+            }
+            regnumassets::asset::font::Font::OpenType(bytes) => {
+                format!("OpenType font, CFF outlines ({} bytes)", bytes.len())
+            }
+            regnumassets::asset::font::Font::FontCollection { faces, .. } => {
+                format!("TrueType collection ({} faces)", faces)
+            }
+        },
+        AssetContent::NotSupported => "Content not supported by this crate".into(),
+    }
+}
+
+fn format_size(size: u32) -> String {
+    if size >= 1024 * 1024 {
+        format!("{:.1} MiB", size as f64 / (1024.0 * 1024.0))
+    } else if size >= 1024 {
+        format!("{:.1} KiB", size as f64 / 1024.0)
+    } else {
+        format!("{} bytes", size)
+    }
+}
+
+fn type_tabs<'a>(app: &'a App) -> Tabs<'a> {
+    let labels: Vec<String> = ALL_TYPES
+        .iter()
+        .map(|filter| {
+            let count = app
+                .entries
+                .iter()
+                .filter(|e| {
+                    filter
+                        .as_ref()
+                        .map_or(true, |t| e.bookmark.asset_type == *t)
+                })
+                .count();
+            format!("{} ({})", type_label(filter), count)
+        })
+        .collect();
+
+    Tabs::new(labels)
+        .block(Block::default().borders(Borders::ALL).title(" Asset type "))
+        .select(app.filter_index)
+        .highlight_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+}
+
+fn hexdump_lines(hex: &Hexdump, width: u16, height: u16) -> (Vec<Line<'static>>, usize) {
+    // bytes per row: 8 offset chars + 2 spaces, then 'XX ' per byte,
+    // then ' ' + ascii gutter of the same width
+    let bytes_per_row = ((width.saturating_sub(12)) / 3).clamp(1, 16) as usize;
+    let data_rows = hex.bytes.len().div_ceil(bytes_per_row);
+    let has_footer = (hex.total as u64) > HEXDUMP_MAX_BYTES;
+    let total_rows = data_rows + usize::from(has_footer);
+
+    // clamp scroll to what fits right now
+    let visible = height as usize;
+    let max_scroll = total_rows.saturating_sub(visible);
+    let scroll = hex.scroll.min(max_scroll);
+
+    let mut lines = vec![];
+    for row in scroll..(scroll + visible).min(total_rows) {
+        if has_footer && row == data_rows {
+            lines.push(
+                Line::from(format!(
+                    "… first {} of {} bytes shown",
+                    hex.bytes.len(),
+                    hex.total
+                ))
+                .fg(Color::DarkGray),
+            );
+            continue;
+        }
+
+        let start = row * bytes_per_row;
+        let chunk = &hex.bytes[start..(start + bytes_per_row).min(hex.bytes.len())];
+
+        let mut hex_part = String::with_capacity(bytes_per_row * 3);
+        let mut ascii_part = String::with_capacity(bytes_per_row);
+        for b in chunk {
+            hex_part.push_str(&format!("{:02X} ", b));
+            if b.is_ascii_graphic() || *b == b' ' {
+                ascii_part.push(*b as char);
+            } else {
+                ascii_part.push('·');
+            }
+        }
+
+        let offset = hex.base + start as u64;
+        lines.push(Line::from(vec![
+            Span::from(format!("{:08X}  ", offset)).fg(Color::DarkGray),
+            Span::from(hex_part).fg(Color::Cyan),
+            Span::from(" "),
+            Span::from(ascii_part).fg(Color::Gray),
+        ]));
+    }
+
+    (lines, bytes_per_row)
+}
+
+fn ui(f: &mut Frame, app: &mut App) {
+    let main = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(5),
+            Constraint::Length(1),
+        ])
+        .split(f.area());
+
+    f.render_widget(type_tabs(app), main[0]);
+
+    let body = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
+        .split(main[1]);
+
+    // right column: hexdump on top, details below
+    let right = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(body[1]);
+
+    let focused = Style::default().fg(Color::Cyan);
+
+    let items: Vec<ListItem> = app
+        .filtered()
+        .into_iter()
+        .map(|e| {
+            let bookmark = &e.bookmark;
+            ListItem::new(Line::from(format!(
+                "#{:<8} {:<24} {}",
+                bookmark.resource_id.unwrap_or(0),
+                truncate(bookmark.name.as_deref().unwrap_or("(unnamed)"), 24),
+                format_size(bookmark.size),
+            )))
+        })
+        .collect();
+
+    let list_block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Assets ")
+        .border_style(if app.focus == Focus::List { focused } else { Style::default() });
+    let list = List::new(items)
+        .block(list_block)
+        .highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
+        .highlight_symbol("> ");
+    f.render_stateful_widget(list, body[0], &mut app.list_state);
+
+    // hexdump pane
+    let hex_lines: Vec<Line<'static>> = match app.hexdump.as_ref() {
+        None => vec![Line::from("no asset loaded").fg(Color::DarkGray)],
+        Some(Err(e)) => vec![
+            Line::from("could not read payload".bold().red()),
+            Line::from(e.clone()),
+        ],
+        Some(Ok(hex)) => {
+            let inner_width = right[0].width.saturating_sub(2);
+            let inner_height = right[0].height.saturating_sub(2);
+            let (lines, _) = hexdump_lines(hex, inner_width, inner_height);
+            lines
+        }
+    };
+
+    let hex_title = match app.hexdump.as_ref() {
+        Some(Ok(hex)) => format!(
+            " Hexdump 0x{:08X}-0x{:08X} / {} ",
+            hex.base,
+            hex.base + hex.bytes.len() as u64 - 1,
+            format_size(hex.total)
+        ),
+        _ => " Hexdump ".to_string(),
+    };
+
+    let hex_block = Block::default()
+        .borders(Borders::ALL)
+        .title(hex_title)
+        .border_style(if app.focus == Focus::Hexdump { focused } else { Style::default() });
+    let hex_paragraph = Paragraph::new(hex_lines).block(hex_block);
+    f.render_widget(hex_paragraph, right[0]);
+
+    let detail_text = app.detail.clone().unwrap_or_else(|| {
+        vec![Line::from(vec![
+            "Press ".into(),
+            "Enter".bold(),
+            " to read the selected asset".into(),
+        ])]
+    });
+
+    let detail = Paragraph::new(detail_text)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Detail ")
+                .border_style(Style::default()),
+        )
+        .wrap(Wrap { trim: false });
+    f.render_widget(detail, right[1]);
+
+    let help = Line::from(vec![
+        "←/→ filter type  ↑/↓ navigate  Enter read asset  Tab focus  q quit ".fg(Color::DarkGray),
+    ]);
+    f.render_widget(Paragraph::new(help), main[2]);
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let mut out: String = s.chars().take(max - 1).collect();
+        out.push('…');
+        out
+    }
+}
+
+fn restore_terminal() {
+    let _ = disable_raw_mode();
+    let _ = execute!(std::io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
+}
+
+fn main() -> Result<()> {
+    let dir = std::env::args().nth(1).unwrap_or_else(|| "examples/regnum".into());
+    let app = App::load(Path::new(&dir));
+
+    // build UI before entering raw mode so load errors show up normally
+    let mut app = match app {
+        Ok(app) => app,
+        Err(e) => {
+            eprintln!("failed to load assets: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    enable_raw_mode()?;
+    execute!(std::io::stdout(), EnterAlternateScreen)?;
+    // restore the terminal even if the app panics
+    let guard = TerminalGuard;
+
+    let backend = CrosstermBackend::new(std::io::stdout());
+    let mut terminal = Terminal::new(backend)?;
+
+    let mut quit = false;
+    while !quit {
+        terminal.draw(|f| ui(f, &mut app))?;
+
+        if !event::poll(std::time::Duration::from_millis(100))? {
+            continue;
+        }
+
+        if let Event::Key(key) = event::read()? {
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
+            match key.code {
+                KeyCode::Char('q') | KeyCode::Esc => quit = true,
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    quit = true
+                }
+                KeyCode::Tab => app.toggle_focus(),
+                KeyCode::Left | KeyCode::Char('h') => app.next_filter(-1),
+                KeyCode::Right | KeyCode::Char('l') => app.next_filter(1),
+                KeyCode::Up | KeyCode::Char('k') => match app.focus {
+                    Focus::List => app.move_cursor(-1),
+                    Focus::Hexdump => app.scroll_hexdump(-1),
+                },
+                KeyCode::Down | KeyCode::Char('j') => match app.focus {
+                    Focus::List => app.move_cursor(1),
+                    Focus::Hexdump => app.scroll_hexdump(1),
+                },
+                KeyCode::PageUp => match app.focus {
+                    Focus::List => app.move_cursor(-10),
+                    Focus::Hexdump => app.scroll_hexdump(-10),
+                },
+                KeyCode::PageDown => match app.focus {
+                    Focus::List => app.move_cursor(10),
+                    Focus::Hexdump => app.scroll_hexdump(10),
+                },
+                KeyCode::Enter | KeyCode::Char(' ') => app.read_selected(),
+                _ => {}
+            }
+        }
+    }
+
+    drop(guard);
+    terminal.show_cursor()?;
+    Ok(())
+}
+
+/// Restores the terminal when dropped (also on panic via unwind).
+struct TerminalGuard;
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        restore_terminal();
+    }
+}

@@ -85,41 +85,66 @@ impl AssetContent {
         mut reader: T,
         _bookmark: &AssetBookmark,
     ) -> Result<AssetContent> {
+        // two header variants are known:
+        // - 12 bytes: [unknown1, width, height]
+        // - 16 bytes: [unknown1, width, height, unknown2]
         let mut buffer = [0; 1];
-        reader.read(&mut buffer)?;
-        let [header_length] = buffer[..] else {
-            return Err(anyhow!(AssetErrors::ParserError).context("texture header length"));
-        };
-        assert_eq!(header_length, 0x10);
-
-        let mut buffer = [0; 16];
-        reader.read(&mut buffer)?;
-        let [_unknown1, width, height, _unknown2] = unsafe {
-            let (_, values, _) = buffer.align_to::<u32>();
-            values.try_into().unwrap()
+        reader.read_exact(&mut buffer)?;
+        let dims_fields = match buffer[0] {
+            12 => 3,
+            16 => 4,
+            other => {
+                return Err(anyhow!(AssetErrors::ParserError)
+                    .context(format!("unexpected texture header length: {}", other)))
+            }
         };
 
-        // let pixels: u32 = height * length * 4;
+        let _unknown1 = reader.read_u32::<LittleEndian>()?;
+        let width = reader.read_u32::<LittleEndian>()?;
+        let height = reader.read_u32::<LittleEndian>()?;
+        if dims_fields == 4 {
+            let _unknown2 = reader.read_u32::<LittleEndian>()?;
+        }
 
+        // marker byte
         let mut buffer = [0; 1];
-        reader.read(&mut buffer)?;
-        let [unknown] = buffer[..] else {
-            return Err(anyhow!(AssetErrors::ParserError).context("unknown texture value"));
-        };
-        assert_eq!(unknown, 0x64);
+        reader.read_exact(&mut buffer)?;
+        if buffer[0] != 0x64 {
+            return Err(anyhow!(AssetErrors::ParserError)
+                .context(format!("unexpected texture marker: {:#04X}", buffer[0])));
+        }
 
-        // TODO: ???
-        let mut buffer = [0; 48];
-        reader.read(&mut buffer)?;
+        // the DDS payload starts a few bytes after the marker; scan for
+        // the magic instead of relying on a fixed layout
+        const DDS_SCAN_WINDOW: usize = 256;
+        let scan_start = reader.stream_position()?;
+        let mut window = vec![0; DDS_SCAN_WINDOW];
+        let read = reader.read(&mut window)?;
+        window.truncate(read);
 
-        let unknown_length = reader.read_u8()?;
+        let dds_offset = window
+            .windows(4)
+            .position(|w| w == b"DDS ")
+            .ok_or_else(|| {
+                anyhow!(AssetErrors::ParserError).context("DDS payload not found")
+            })?;
 
-        // TODO: ???
-        let mut buffer = vec![0; unknown_length as usize];
-        reader.read(&mut buffer)?;
+        reader.seek(std::io::SeekFrom::Start(scan_start + dds_offset as u64))?;
 
-        // DDS string starts here
-        let dds = Dds::read(reader)?;
+        // Dds::read consumes everything the reader yields, so bound it to
+        // this asset. The payload ends at the node's end marker, but note
+        // that bookmark.size may fall a few bytes short of the full asset
+        // wrapper, so read some slack and cut at the marker.
+        const NODE_TRAILER: &[u8] = b"RIAPINDXPAR";
+        let mut data = Vec::new();
+        reader
+            .take(_bookmark.size as u64 + 64 * 1024)
+            .read_to_end(&mut data)?;
+        if let Some(end) = data.windows(NODE_TRAILER.len()).position(|w| w == NODE_TRAILER) {
+            data.truncate(end);
+        }
+
+        let dds = Dds::read(std::io::Cursor::new(data))?;
 
         Ok(AssetContent::Texture { width, height, dds })
     }

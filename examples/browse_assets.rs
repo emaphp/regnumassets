@@ -7,7 +7,10 @@ use crossterm::{
 };
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Tabs, Wrap},
+    widgets::{
+        Block, Borders, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation,
+        ScrollbarState, Tabs, Wrap,
+    },
 };
 use regnumassets::{AssetBookmark, AssetContent, AssetData, AssetType, ResourceIndex};
 use std::{
@@ -55,6 +58,7 @@ enum Focus {
     Hexdump,
 }
 
+#[derive(Clone)]
 struct Hexdump {
     /// raw payload bytes (may be capped to HEXDUMP_MAX_BYTES)
     bytes: Vec<u8>,
@@ -62,8 +66,11 @@ struct Hexdump {
     base: u64,
     /// full payload size
     total: u32,
-    /// first visible row
+    /// first visible row; clamped to [0, max_scroll]
     scroll: usize,
+    /// highest scroll position (data_rows - visible), refreshed on
+    /// every frame by the renderer since it depends on pane size
+    max_scroll: usize,
 }
 
 struct Database {
@@ -179,7 +186,8 @@ impl App {
 
     fn scroll_hexdump(&mut self, delta: isize) {
         if let Some(Ok(hex)) = self.hexdump.as_mut() {
-            hex.scroll = (hex.scroll as isize + delta).max(0) as usize;
+            let next = hex.scroll as isize + delta;
+            hex.scroll = next.clamp(0, hex.max_scroll as isize) as usize;
         }
     }
 
@@ -293,6 +301,7 @@ fn read_payload_head(db_path: &Path, bookmark: &AssetBookmark) -> Result<Hexdump
         base,
         total: bookmark.size,
         scroll: 0,
+        max_scroll: 0,
     })
 }
 
@@ -369,6 +378,12 @@ struct HexdumpColumns {
     ascii: Vec<Line<'static>>,
     /// bytes shown per row; the hex sub-pane is `3 * bytes_per_row` wide
     bytes_per_row: usize,
+    /// total data rows in the payload (regardless of what is visible)
+    data_rows: usize,
+    /// highest scroll position (data_rows - visible)
+    max_scroll: usize,
+    /// first visible row after clamping to the pane height
+    scroll: usize,
 }
 
 fn hexdump_columns(hex: &Hexdump, width: u16, height: u16) -> HexdumpColumns {
@@ -386,6 +401,9 @@ fn hexdump_columns(hex: &Hexdump, width: u16, height: u16) -> HexdumpColumns {
         hex: vec![],
         ascii: vec![],
         bytes_per_row,
+        data_rows,
+        max_scroll,
+        scroll,
     };
     for row in scroll..(scroll + visible).min(data_rows) {
         let start = row * bytes_per_row;
@@ -479,6 +497,33 @@ fn ui(f: &mut Frame, app: &mut App) {
     let hex_inner = hex_block.inner(right[0]);
     f.render_widget(hex_block, right[0]);
 
+    // the truncated-payload notice gets its own bottom row so it stays
+    // pinned and full-width instead of scrolling with the data
+    let has_footer = matches!(
+        app.hexdump.as_ref(),
+        Some(Ok(hex)) if hex.total as u64 > HEXDUMP_MAX_BYTES
+    );
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(u16::from(has_footer)),
+        ])
+        .split(hex_inner);
+
+    let view = match app.hexdump.as_ref() {
+        Some(Ok(hex)) => Some(hexdump_columns(hex, hex_inner.width, rows[0].height)),
+        _ => None,
+    };
+
+    // write back the effective scroll position and bound so key handling
+    // clamps against the current pane size; this also snaps a stale
+    // scroll value after a terminal resize
+    if let (Some(Ok(hex)), Some(view)) = (app.hexdump.as_mut(), view.as_ref()) {
+        hex.max_scroll = view.max_scroll;
+        hex.scroll = view.scroll;
+    }
+
     match app.hexdump.as_ref() {
         None => {
             let p = Paragraph::new(Line::from("no asset loaded").fg(Color::DarkGray));
@@ -492,18 +537,7 @@ fn ui(f: &mut Frame, app: &mut App) {
             f.render_widget(Paragraph::new(lines), hex_inner);
         }
         Some(Ok(hex)) => {
-            // the truncated-payload notice gets its own bottom row so it
-            // stays pinned and full-width instead of scrolling with data
-            let has_footer = (hex.total as u64) > HEXDUMP_MAX_BYTES;
-            let rows = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Min(0),
-                    Constraint::Length(u16::from(has_footer)),
-                ])
-                .split(hex_inner);
-
-            let view = hexdump_columns(hex, hex_inner.width, rows[0].height);
+            let view = view.expect("hexdump view present for a loaded asset");
             let cols = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([
@@ -515,6 +549,20 @@ fn ui(f: &mut Frame, app: &mut App) {
             f.render_widget(Paragraph::new(view.offsets), cols[0]);
             f.render_widget(Paragraph::new(view.hex), cols[1]);
             f.render_widget(Paragraph::new(view.ascii), cols[2]);
+
+            // vertical scrollbar on the pane's right edge, only when the
+            // payload has more rows than fit on screen; sits on the data
+            // area so it never covers the truncated-payload footer. The
+            // content length is the maximum scroll position plus one so
+            // the thumb touches the track bottom at max scroll (the pane
+            // does not overscroll past the last row)
+            if view.max_scroll > 0 && rows[0].height > 0 {
+                let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                    .begin_symbol(None)
+                    .end_symbol(None);
+                let mut state = ScrollbarState::new(view.max_scroll + 1).position(view.scroll);
+                f.render_stateful_widget(scrollbar, rows[0], &mut state);
+            }
 
             if has_footer {
                 let footer = Line::from(format!(
@@ -656,6 +704,7 @@ mod tests {
             base: 0x11A4_F03E,
             total: 201,
             scroll: 0,
+            max_scroll: 0,
         };
         let area = Rect::new(0, 0, 75, 15);
         let view = hexdump_columns(&hex, area.width, area.height);
@@ -694,5 +743,31 @@ mod tests {
                 );
             }
         }
+
+        // the scroll reported for the scrollbar stays within the
+        // content, even when the app state runs past the end
+        assert_eq!(view.scroll, 0);
+        let mut hex = hex.clone();
+        hex.scroll = 999;
+
+        // pane shorter than the content: scroll clamps to max_scroll
+        let view = hexdump_columns(&hex, area.width, 8);
+        assert_eq!(view.max_scroll, view.data_rows - 8);
+        assert_eq!(view.scroll, view.max_scroll);
+
+        // at max scroll the scrollbar thumb must touch the track bottom
+        let mut sb_buf = Buffer::empty(area);
+        let mut state = ScrollbarState::new(view.max_scroll + 1).position(view.scroll);
+        Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .render(area, &mut sb_buf, &mut state);
+        let bottom = sb_buf.get(area.width - 1, area.height - 1);
+        assert_eq!(bottom.symbol(), "█", "thumb must reach the track bottom");
+
+        // pane taller than the content: nothing to scroll
+        let view = hexdump_columns(&hex, area.width, area.height);
+        assert_eq!(view.max_scroll, 0);
+        assert_eq!(view.scroll, 0);
     }
 }

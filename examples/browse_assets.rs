@@ -361,33 +361,33 @@ fn type_tabs<'a>(app: &'a App) -> Tabs<'a> {
         .highlight_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
 }
 
-fn hexdump_lines(hex: &Hexdump, width: u16, height: u16) -> (Vec<Line<'static>>, usize) {
-    // bytes per row: 8 offset chars + 2 spaces, then 'XX ' per byte,
-    // then ' ' + ascii gutter of the same width
+/// The three hexdump columns, rendered as borderless sub-panes of fixed
+/// width so every column stays aligned regardless of row length.
+struct HexdumpColumns {
+    offsets: Vec<Line<'static>>,
+    hex: Vec<Line<'static>>,
+    ascii: Vec<Line<'static>>,
+    /// bytes shown per row; the hex sub-pane is `3 * bytes_per_row` wide
+    bytes_per_row: usize,
+}
+
+fn hexdump_columns(hex: &Hexdump, width: u16, height: u16) -> HexdumpColumns {
+    // bytes per row: 8 offset chars + 2 spaces, then 'XX ' per byte
     let bytes_per_row = ((width.saturating_sub(12)) / 3).clamp(1, 16) as usize;
     let data_rows = hex.bytes.len().div_ceil(bytes_per_row);
-    let has_footer = (hex.total as u64) > HEXDUMP_MAX_BYTES;
-    let total_rows = data_rows + usize::from(has_footer);
 
     // clamp scroll to what fits right now
     let visible = height as usize;
-    let max_scroll = total_rows.saturating_sub(visible);
+    let max_scroll = data_rows.saturating_sub(visible);
     let scroll = hex.scroll.min(max_scroll);
 
-    let mut lines = vec![];
-    for row in scroll..(scroll + visible).min(total_rows) {
-        if has_footer && row == data_rows {
-            lines.push(
-                Line::from(format!(
-                    "… first {} of {} bytes shown",
-                    hex.bytes.len(),
-                    hex.total
-                ))
-                .fg(Color::DarkGray),
-            );
-            continue;
-        }
-
+    let mut columns = HexdumpColumns {
+        offsets: vec![],
+        hex: vec![],
+        ascii: vec![],
+        bytes_per_row,
+    };
+    for row in scroll..(scroll + visible).min(data_rows) {
         let start = row * bytes_per_row;
         let chunk = &hex.bytes[start..(start + bytes_per_row).min(hex.bytes.len())];
 
@@ -403,15 +403,14 @@ fn hexdump_lines(hex: &Hexdump, width: u16, height: u16) -> (Vec<Line<'static>>,
         }
 
         let offset = hex.base + start as u64;
-        lines.push(Line::from(vec![
-            Span::from(format!("{:08X}  ", offset)).fg(Color::DarkGray),
-            Span::from(hex_part).fg(Color::Cyan),
-            Span::from(" "),
-            Span::from(ascii_part).fg(Color::Gray),
-        ]));
+        columns
+            .offsets
+            .push(Line::from(format!("{:08X}  ", offset)).fg(Color::DarkGray));
+        columns.hex.push(Line::from(hex_part).fg(Color::Cyan));
+        columns.ascii.push(Line::from(ascii_part).fg(Color::Gray));
     }
 
-    (lines, bytes_per_row)
+    columns
 }
 
 fn ui(f: &mut Frame, app: &mut App) {
@@ -463,21 +462,6 @@ fn ui(f: &mut Frame, app: &mut App) {
         .highlight_symbol("> ");
     f.render_stateful_widget(list, body[0], &mut app.list_state);
 
-    // hexdump pane
-    let hex_lines: Vec<Line<'static>> = match app.hexdump.as_ref() {
-        None => vec![Line::from("no asset loaded").fg(Color::DarkGray)],
-        Some(Err(e)) => vec![
-            Line::from("could not read payload".bold().red()),
-            Line::from(e.clone()),
-        ],
-        Some(Ok(hex)) => {
-            let inner_width = right[0].width.saturating_sub(2);
-            let inner_height = right[0].height.saturating_sub(2);
-            let (lines, _) = hexdump_lines(hex, inner_width, inner_height);
-            lines
-        }
-    };
-
     let hex_title = match app.hexdump.as_ref() {
         Some(Ok(hex)) => format!(
             " Hexdump 0x{:08X}-0x{:08X} / {} ",
@@ -492,8 +476,57 @@ fn ui(f: &mut Frame, app: &mut App) {
         .borders(Borders::ALL)
         .title(hex_title)
         .border_style(if app.focus == Focus::Hexdump { focused } else { Style::default() });
-    let hex_paragraph = Paragraph::new(hex_lines).block(hex_block);
-    f.render_widget(hex_paragraph, right[0]);
+    let hex_inner = hex_block.inner(right[0]);
+    f.render_widget(hex_block, right[0]);
+
+    match app.hexdump.as_ref() {
+        None => {
+            let p = Paragraph::new(Line::from("no asset loaded").fg(Color::DarkGray));
+            f.render_widget(p, hex_inner);
+        }
+        Some(Err(e)) => {
+            let lines = vec![
+                Line::from("could not read payload".bold().red()),
+                Line::from(e.clone()),
+            ];
+            f.render_widget(Paragraph::new(lines), hex_inner);
+        }
+        Some(Ok(hex)) => {
+            // the truncated-payload notice gets its own bottom row so it
+            // stays pinned and full-width instead of scrolling with data
+            let has_footer = (hex.total as u64) > HEXDUMP_MAX_BYTES;
+            let rows = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Min(0),
+                    Constraint::Length(u16::from(has_footer)),
+                ])
+                .split(hex_inner);
+
+            let view = hexdump_columns(hex, hex_inner.width, rows[0].height);
+            let cols = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Length(10),
+                    Constraint::Length(view.bytes_per_row as u16 * 3),
+                    Constraint::Min(0),
+                ])
+                .split(rows[0]);
+            f.render_widget(Paragraph::new(view.offsets), cols[0]);
+            f.render_widget(Paragraph::new(view.hex), cols[1]);
+            f.render_widget(Paragraph::new(view.ascii), cols[2]);
+
+            if has_footer {
+                let footer = Line::from(format!(
+                    "… first {} of {} bytes shown",
+                    hex.bytes.len(),
+                    hex.total
+                ))
+                .fg(Color::DarkGray);
+                f.render_widget(Paragraph::new(footer), rows[1]);
+            }
+        }
+    }
 
     let detail_text = app.detail.clone().unwrap_or_else(|| {
         vec![Line::from(vec![
@@ -608,5 +641,58 @@ struct TerminalGuard;
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         restore_terminal();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ascii_gutter_starts_at_fixed_column_in_rendered_buffer() {
+        // 201 bytes -> 12 full rows of 16 + one partial row of 9
+        let hex = Hexdump {
+            bytes: (0..=200).collect(),
+            base: 0x11A4_F03E,
+            total: 201,
+            scroll: 0,
+        };
+        let area = Rect::new(0, 0, 75, 15);
+        let view = hexdump_columns(&hex, area.width, area.height);
+        assert_eq!(view.bytes_per_row, 16);
+        assert_eq!(view.offsets.len(), 13);
+
+        // render the three columns into a buffer using the same layout
+        // split as the hexdump pane
+        let mut buf = Buffer::empty(area);
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Length(10),
+                Constraint::Length(view.bytes_per_row as u16 * 3),
+                Constraint::Min(0),
+            ])
+            .split(area);
+        Paragraph::new(view.offsets.clone()).render(cols[0], &mut buf);
+        Paragraph::new(view.hex.clone()).render(cols[1], &mut buf);
+        Paragraph::new(view.ascii.clone()).render(cols[2], &mut buf);
+
+        // no ascii content may bleed into the hex pane's blank area:
+        // between the end of the hex text and the gutter's left edge
+        // every cell must stay blank, on every row including the
+        // partial last one
+        let total = hex.bytes.len();
+        for y in 0..view.offsets.len() {
+            let chunk_len = view.bytes_per_row.min(total - y * view.bytes_per_row);
+            let hex_end = 10 + chunk_len * 3;
+            for x in hex_end..cols[2].x as usize {
+                let cell = buf.get(x as u16, y as u16);
+                assert_eq!(
+                    cell.symbol(),
+                    " ",
+                    "row {y}: non-blank cell at column {x} between hex text and gutter"
+                );
+            }
+        }
     }
 }

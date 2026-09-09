@@ -154,6 +154,7 @@ impl App {
         }
         self.detail = None;
         self.hexdump = None;
+        self.focus = Focus::List;
         self.status = format!("{} assets ({} shown)", self.entries.len(), len);
     }
 
